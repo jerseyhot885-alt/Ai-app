@@ -1,27 +1,103 @@
- - name: Extract LifeOS Android project
-    run: |
-      test -f LifeOS_Native_PDF_Picker_GitHub_Build.zip
-      unzip -q LifeOS_Native_PDF_Picker_GitHub_Build.zip -d lifeos-project
 
-  - name: Set up Java 17
-    uses: actions/setup-java@v4
-    with:
-      distribution: temurin
-      java-version: '17'
+name: Build LifeOS APK
 
-  - name: Install Gradle
-    uses: gradle/actions/setup-gradle@v4
-    with:
-      gradle-version: '8.9'
+'on':
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
-  - name: Build debug APK
-    working-directory: lifeos-project
-    run: gradle --no-daemon assembleDebug
+permissions:
+  contents: read
 
-  - name: Upload APK
-    uses: actions/upload-artifact@v4
-    with:
-      name: LifeOS-debug-apk
-      path: lifeos-project/app/build/outputs/apk/debug/app-debug.apk
-      if-no-files-found: error
-      retention-days: 7
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify project files
+        run: |
+          test -f settings.gradle || test -f settings.gradle.kts
+          test -f app/build.gradle || test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
+          test -f app/src/main/assets/index.html
+          echo "Android project files found."
+
+      - name: Generate launcher icons from custom image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ICON="app-icon.png"
+          if [ ! -f "$ICON" ]; then
+            ICON="app/src/main/assets/app-icon.png"
+          fi
+
+          if [ -f "$ICON" ]; then
+            python3 -m pip install --quiet Pillow
+            python3 - "$ICON" <<'PY'
+          from PIL import Image
+          from pathlib import Path
+          import sys
+
+          source = Image.open(sys.argv[1]).convert("RGBA")
+          sizes = {
+              "mipmap-mdpi": 48,
+              "mipmap-hdpi": 72,
+              "mipmap-xhdpi": 96,
+              "mipmap-xxhdpi": 144,
+              "mipmap-xxxhdpi": 192,
+          }
+
+          root = Path("app/src/main/res")
+          for folder, size in sizes.items():
+              out = root / folder
+              out.mkdir(parents=True, exist_ok=True)
+              image = source.resize((size, size), Image.Resampling.LANCZOS)
+              image.save(out / "ic_launcher.png")
+              image.save(out / "ic_launcher_round.png")
+
+          print("Custom LifeOS launcher icons generated.")
+          PY
+          else
+            echo "::error::Custom icon not found. Add app-icon.png to the repository root."
+            exit 1
+          fi
+
+      - name: Make Gradle wrapper executable
+        run: |
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+          else
+            echo "::error::gradlew is missing from the project."
+            exit 1
+          fi
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Verify APK exists
+        run: |
+          test -f app/build/outputs/apk/debug/app-debug.apk
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LifeOS-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
