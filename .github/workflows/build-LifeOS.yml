@@ -25,47 +25,93 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Locate Android project
+      - name: Extract LifeOS project
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -f settings.gradle ] || [ -f settings.gradle.kts ]; then
-            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
-          elif [ -f LifeOS/settings.gradle ] || [ -f LifeOS/settings.gradle.kts ]; then
-            echo "PROJECT_DIR=LifeOS" >> "$GITHUB_ENV"
-          else
-            echo "::error::settings.gradle not found. Upload the Android project files, including settings.gradle, build.gradle and the app folder."
-            echo "Repository files:"
+          ZIP_FILE="LifeOS-project-with-my-icon.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "::error::Project ZIP not found: $ZIP_FILE"
             ls -la
             exit 1
           fi
 
-      - name: Verify project files
+          mkdir -p "$RUNNER_TEMP/lifeos-source"
+          unzip -oq "$ZIP_FILE" -d "$RUNNER_TEMP/lifeos-source"
+
+          SETTINGS_FILE="$(find "$RUNNER_TEMP/lifeos-source" \
+            -type f \( -name settings.gradle -o -name settings.gradle.kts \) \
+            -print -quit)"
+
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "::error::No settings.gradle found inside the project ZIP."
+            find "$RUNNER_TEMP/lifeos-source" -maxdepth 4 -type f
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Android project found at: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+
+      - name: Verify Android project
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
+
           test -f build.gradle || test -f build.gradle.kts
           test -f app/build.gradle || test -f app/build.gradle.kts
           test -f app/src/main/AndroidManifest.xml
-          test -f app/src/main/assets/index.html
-          test -f app-icon.png
-          test -f scripts/generate_launcher_icons.py
-          echo "All required LifeOS files found."
+
+          echo "Android project files verified."
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Generate custom launcher icons
+      - name: Integrate custom LifeOS icon
         shell: bash
         run: |
           set -euo pipefail
-          cd "$PROJECT_DIR"
-          python -m pip install --disable-pip-version-check Pillow
-          python scripts/generate_launcher_icons.py
+
+          python -m pip install --quiet Pillow
+
+          python - <<'PY'
+          from PIL import Image
+          from pathlib import Path
+
+          source = Path("app-icon.png")
+          if not source.is_file():
+              raise SystemExit("app-icon.png is missing from the repository.")
+
+          image = Image.open(source).convert("RGBA")
+          sizes = {
+              "mipmap-mdpi": 48,
+              "mipmap-hdpi": 72,
+              "mipmap-xhdpi": 96,
+              "mipmap-xxhdpi": 144,
+              "mipmap-xxxhdpi": 192,
+          }
+
+          root = Path(__import__("os").environ["PROJECT_DIR"])
+          res = root / "app/src/main/res"
+
+          for folder, size in sizes.items():
+              directory = res / folder
+              directory.mkdir(parents=True, exist_ok=True)
+              resized = image.resize(
+                  (size, size), Image.Resampling.LANCZOS
+              )
+              resized.save(directory / "ic_launcher.png")
+              resized.save(directory / "ic_launcher_round.png")
+
+          print("LifeOS launcher icons generated.")
+          PY
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -83,10 +129,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-          ls -lh "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          ls -lh "$APK"
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: LifeOS-debug-apk
